@@ -84,6 +84,7 @@ trait HasDiffTestInterfaces extends ImplicitClock with ImplicitReset { this: Raw
     def portFilter(port: (String, Data)): Boolean = {
       memPortFilter(port._2) ||
       port._1.contains("bore") || // Internal port created by BoringUtils, connected to difftest only
+      port._1.contains("x_") || // Internal port created by ExposureUtils
       (port._2 match {
         case u: UARTIO => true // UART port for simulation framework, connected to difftest only
         case b: Bundle => b.elements.toSeq.exists(portFilter)
