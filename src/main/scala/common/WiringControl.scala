@@ -16,19 +16,10 @@
 package difftest.common
 
 import chisel3._
-import chisel3.util.experimental.BoringUtils
-import chisel3.reflect.DataMirror
+import chisel3.util.experimental.ExposureUtils
+import scala.collection.mutable
 
-// Wrapper for the Chisel wiring utils.
-private object WiringControl {
-  def addSource(data: Data, name: String): Unit = BoringUtils.addSource(data, s"difftest_$name")
-
-  def addSink(data: Data, name: String): Unit = BoringUtils.addSink(data, s"difftest_$name")
-
-  def tapAndRead[T <: Data](source: T): T = BoringUtils.tapAndRead(source)
-
-  def bore[T <: Data](source: T): T = BoringUtils.bore(source)
-}
+private final case class DifftestSourceTag(name: String) extends ExposureTag
 
 private class WiringInfo(val data: Data, val name: String, val isHierarchical: Boolean) {
   private var nSources: Int = 0
@@ -57,7 +48,26 @@ private class WiringInfo(val data: Data, val name: String, val isHierarchical: B
 }
 
 object DifftestWiring {
-  private val wires = scala.collection.mutable.ListBuffer.empty[WiringInfo]
+  private val wires = mutable.ListBuffer.empty[WiringInfo]
+  
+  private var _collectedSources: Option[Map[String, Data]] = None
+  private def collectedSources: Map[String, Data] = {
+    _collectedSources.getOrElse {
+      var collected = Map.empty[String, Data]
+      val duplicated = mutable.ListBuffer.empty[String]
+      val exposed = ExposureUtils.collect[DifftestSourceTag]()
+      exposed.foreach { case (tag, data) =>
+        collected.get(tag.name) match {
+          case Some(_) => duplicated += tag.name
+          case None => collected += tag.name -> data
+        }
+      }
+      require(duplicated.isEmpty, s"duplicate exposed difftest sources: ${duplicated.mkString(", ")}")
+      _collectedSources = Some(collected)
+      collected
+    }
+  }
+
   private def getWire(data: Data, name: String, isHierarchical: Boolean): WiringInfo = {
     wires.find(_.name == name).getOrElse {
       val info = new WiringInfo(data, name, isHierarchical)
@@ -68,6 +78,7 @@ object DifftestWiring {
 
   def addSource[T <: Data](data: T, name: String, isHierarchical: Boolean): T = {
     getWire(data, name, isHierarchical).setSource()
+    ExposureUtils.expose(DifftestSourceTag(name), isUpward = true, data)
     data
   }
 
@@ -78,13 +89,12 @@ object DifftestWiring {
   def addSink[T <: Data](data: T, name: String, isHierarchical: Boolean): T = {
     val info = getWire(data, name, isHierarchical).addSink()
     require(!info.isPending, s"[${info.name}]: Wiring requires addSource before addSink")
-    if (DataMirror.isVisible(info.data)) {
-      data := info.data
-    } else if (isHierarchical) {
-      data := WiringControl.tapAndRead(info.data)
-    } else {
-      data := WiringControl.bore(info.data)
-    }
+    val source = collectedSources.getOrElse(
+      name,
+      throw new IllegalArgumentException(s"[$name]: no exposed source reached the collection point")
+    )
+    require(source.getWidth == data.getWidth, s"[$name]: source/sink widths differ")
+    data := source
     data
   }
 
