@@ -17,9 +17,21 @@ package difftest.common
 
 import chisel3._
 import chisel3.util.experimental.ExposureUtils
+import difftest.DifftestBundle
 import scala.collection.mutable
 
-private final case class DifftestSourceTag(name: String) extends ExposureTag
+private[difftest] sealed trait DifftestSourceMetadata
+
+private[difftest] final case class GatewaySourceMetadata(bundle: DifftestBundle, delay: Int)
+  extends DifftestSourceMetadata
+
+private final case class DifftestSourceTag(name: String, metadata: Option[DifftestSourceMetadata]) extends ExposureTag
+
+private final case class ExposedDifftestSource(
+  name: String,
+  metadata: Option[DifftestSourceMetadata],
+  data: Data,
+)
 
 private class WiringInfo(val data: Data, val name: String, val isHierarchical: Boolean) {
   private var nSources: Int = 0
@@ -49,17 +61,27 @@ private class WiringInfo(val data: Data, val name: String, val isHierarchical: B
 
 object DifftestWiring {
   private val wires = mutable.ListBuffer.empty[WiringInfo]
-  
+
+  private var _exposedSources: Option[Seq[ExposedDifftestSource]] = None
+  private def exposedSources: Seq[ExposedDifftestSource] = {
+    _exposedSources.getOrElse {
+      val sources = ExposureUtils.collect[DifftestSourceTag]().map { case (tag, data) =>
+        ExposedDifftestSource(tag.name, tag.metadata, data)
+      }
+      _exposedSources = Some(sources)
+      sources
+    }
+  }
+
   private var _collectedSources: Option[Map[String, Data]] = None
   private def collectedSources: Map[String, Data] = {
     _collectedSources.getOrElse {
       var collected = Map.empty[String, Data]
       val duplicated = mutable.ListBuffer.empty[String]
-      val exposed = ExposureUtils.collect[DifftestSourceTag]()
-      exposed.foreach { case (tag, data) =>
-        collected.get(tag.name) match {
-          case Some(_) => duplicated += tag.name
-          case None => collected += tag.name -> data
+      exposedSources.filter(_.metadata.isEmpty).foreach { source =>
+        collected.get(source.name) match {
+          case Some(_) => duplicated += source.name
+          case None => collected += source.name -> source.data
         }
       }
       require(duplicated.isEmpty, s"duplicate exposed difftest sources: ${duplicated.mkString(", ")}")
@@ -76,14 +98,31 @@ object DifftestWiring {
     }
   }
 
-  def addSource[T <: Data](data: T, name: String, isHierarchical: Boolean): T = {
+  def addSource[T <: Data](
+    data: T,
+    name: String,
+    isHierarchical: Boolean,
+  ): T = {
     getWire(data, name, isHierarchical).setSource()
-    ExposureUtils.expose(DifftestSourceTag(name), isUpward = true, data)
+    ExposureUtils.expose(DifftestSourceTag(name, None), isUpward = true, data)
     data
   }
 
   def addSource[T <: Data](data: T, name: String): T = {
     addSource[T](data, name, false)
+  }
+
+  private[difftest] def exposeSource[T <: Data](
+    data: T,
+    name: String,
+    metadata: DifftestSourceMetadata,
+  ): T = {
+    ExposureUtils.expose(DifftestSourceTag(name, Some(metadata)), isUpward = true, data)
+    data
+  }
+
+  private[difftest] def collectMetadataSources: Seq[(DifftestSourceMetadata, Data)] = {
+    exposedSources.flatMap(source => source.metadata.map(_ -> source.data))
   }
 
   def addSink[T <: Data](data: T, name: String, isHierarchical: Boolean): T = {
@@ -102,7 +141,17 @@ object DifftestWiring {
     addSink[T](data, name, false)
   }
 
-  def isEmpty: Boolean = !hasPending
+  private def clearCollectedState(): Unit = {
+    wires.clear()
+    _exposedSources = None
+    _collectedSources = None
+  }
+
+  def isEmpty: Boolean = {
+    val empty = !hasPending
+    if (empty && _exposedSources.isDefined) clearCollectedState()
+    empty
+  }
   def hasPending: Boolean = wires.exists(_.isPending)
   def getPending: Seq[(Boolean, Data, String, Boolean)] = wires.flatMap(_.toPendingTuple).toSeq
 
