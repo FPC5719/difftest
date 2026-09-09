@@ -18,7 +18,7 @@ package difftest.gateway
 import chisel3._
 import chisel3.util._
 import difftest._
-import difftest.common.DifftestWiring
+import difftest.common.{DifftestWiring, GatewaySourceMetadata}
 import difftest.util.Delayer
 import difftest.dpic.DPIC
 import difftest.preprocess.Preprocess
@@ -130,6 +130,7 @@ case class GatewayResult(
   cppMacros: Seq[String] = Seq(),
   vMacros: Seq[String] = Seq(),
   instances: Seq[DifftestBundle] = Seq(),
+  interfaces: Seq[(DifftestBundle, Int)] = Seq(),
   structPacked: Option[Boolean] = None,
   structAligned: Option[Boolean] = None, // Align struct Elem to 8 bytes for Delta Feature
   cppExtModule: Option[Boolean] = None,
@@ -146,6 +147,7 @@ case class GatewayResult(
       cppMacros = cppMacros ++ that.cppMacros,
       vMacros = vMacros ++ that.vMacros,
       instances = instances ++ that.instances,
+      interfaces = interfaces ++ that.interfaces,
       structPacked = if (structPacked.isDefined) structPacked else that.structPacked,
       structAligned = if (structAligned.isDefined) structAligned else that.structAligned,
       cppExtModule = if (cppExtModule.isDefined) cppExtModule else that.cppExtModule,
@@ -161,7 +163,7 @@ case class GatewayResult(
 }
 
 object Gateway {
-  private val instanceWithDelay = ListBuffer.empty[(DifftestBundle, Int)]
+  private var sourceCount = 0
   private var config = GatewayConfig()
 
   def isFPGA: Boolean = config.isFPGA
@@ -193,17 +195,19 @@ object Gateway {
   def apply[T <: DifftestBundle](gen: T, delay: Int): T = {
     val bundle = WireInit(0.U.asTypeOf(gen)).suggestName(gen.desiredCppName)
     dontTouch(bundle)
-    if (!config.traceLoad) {
-      if (config.needEndpoint) {
-        val packed = WireInit(UInt(bundle.getWidth.W), bundle.asUInt)
-        DifftestWiring.addSource(packed, s"gateway_${instanceWithDelay.length}", config.hierarchicalWiring)
-      } else {
-        val control = WireInit(0.U.asTypeOf(new GatewaySinkControl(config)))
-        control.enable := true.B
-        GatewaySink(control, Delayer(bundle, delay).genValidBundle, config)
-      }
+    if (config.needEndpoint) {
+      val packed = WireInit(UInt(bundle.getWidth.W), bundle.asUInt)
+      DifftestWiring.exposeSource(
+        packed,
+        s"gateway_$sourceCount",
+        GatewaySourceMetadata(gen, delay),
+      )
+      sourceCount += 1
+    } else {
+      val delayed = Delayer(bundle, delay).genValidBundle
+      DifftestWiring.exposeSource(delayed, s"gateway_$sourceCount", GatewaySourceMetadata(gen, 0))
+      sourceCount += 1
     }
-    instanceWithDelay += ((gen, delay))
     bundle
   }
 
@@ -217,23 +221,24 @@ object Gateway {
   }
 
   def collect(): GatewayResult = {
-    val instances = instanceWithDelay.map(_._1).toSeq
+    val sourceInstances = DifftestWiring.collectMetadataSources.collect {
+      case (GatewaySourceMetadata(bundle, delay), data) => (bundle, delay, data)
+    }
+    val instanceWithDelay = sourceInstances.map { case (bundle, delay, _) => (bundle, delay) }
+    val instances = instanceWithDelay.map(_._1)
     val sink = if (config.needEndpoint) {
       val gatewayIn = if (config.traceLoad) {
         MixedVecInit(Trace.load(instances).toSeq.map(_.asUInt)).asUInt
       } else {
-        val packed = WireInit(0.U.asTypeOf(MixedVec(instances.map(gen => UInt(gen.getWidth.W)))))
-        for ((data, idx) <- packed.zipWithIndex) {
-          DifftestWiring.addSink(data, s"gateway_$idx", config.hierarchicalWiring)
-        }
-        packed.asUInt
+        MixedVecInit(sourceInstances.map(_._3.asUInt)).asUInt
       }
-      val endpoint = Module(new GatewayEndpoint(instanceWithDelay.toSeq, config))
+      val endpoint = Module(new GatewayEndpoint(instanceWithDelay, config))
       endpoint.in := gatewayIn
       val numCores = instances.count(_.isUniqueIdentifier)
       GatewayResult(
         vMacros = Seq(s"CONFIG_DIFFTEST_INTERFACE_WIDTH ${gatewayIn.getWidth / numCores}"),
         instances = endpoint.instances,
+        interfaces = instanceWithDelay,
         structPacked = Some(config.isBatch),
         structAligned = Some(config.isDelta),
         refClock = Option.when(config.hasClockGate)(endpoint.clock),
@@ -244,7 +249,14 @@ object Gateway {
         clockEnable = endpoint.clockEnable,
       )
     } else {
-      GatewayResult(instances = getInstance(instances)) + GatewaySink.collect(config, getInstance(instances))
+      if (!config.traceLoad) {
+        sourceInstances.foreach { case (_, _, data) =>
+          val control = WireInit(0.U.asTypeOf(new GatewaySinkControl(config)))
+          control.enable := true.B
+          GatewaySink(control, data.asInstanceOf[Valid[DifftestBundle]], config)
+        }
+      }
+      GatewayResult(instances = getInstance(instances), interfaces = instanceWithDelay) + GatewaySink.collect(config, getInstance(instances))
     }
     sink + GatewayResult(
       cppMacros = config.cppMacros,
