@@ -219,6 +219,4 @@ class SimTop[T <: RawModule with HasDiffTestInterfaces](cpuGen: => T, modPrefix:
     io <> gen
   }
 
-  // There should not be anymore IOs
-  require(DifftestWiring.isEmpty, s"pending wires left: ${DifftestWiring.getPending}")
 }

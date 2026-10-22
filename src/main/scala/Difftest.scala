@@ -579,7 +579,6 @@ trait DifftestModule[T <: DifftestBundle] {
 
 object DifftestModule {
   private val enabled = true
-  private val interfaces = ListBuffer.empty[(DifftestBundle, Int)]
   private val cppExtModules = ListBuffer.empty[(String, String)]
   private val cppExtHeaders = ListBuffer.empty[String]
   private val cppDPICModules = ListBuffer.empty[(String, String)]
@@ -620,7 +619,6 @@ object DifftestModule {
     val isExcluded = nameExcludes.exists(ex => gen.desiredModuleName.contains(ex))
     if (enabled && !isExcluded) {
       Gateway(gen, delay) := difftest
-      interfaces.append((gen, delay))
     }
     if (dontCare) {
       difftest := DontCare
@@ -637,8 +635,6 @@ object DifftestModule {
     require(gens.nonEmpty, "DifftestModule.applyVec requires at least one lane")
     gens.map(gen => apply(gen, dontCare, delay))
   }
-
-  def get_current_interfaces(): Seq[(DifftestBundle, Int)] = interfaces.toSeq
 
   def get_command_configs(): Seq[String] = cmdConfigs.toSeq
 
@@ -662,7 +658,7 @@ object DifftestModule {
       generateCppExtModules()
     }
     generateVerilogHeader(cpu, gateway.vMacros)
-    Profile.generateJson(cpu, cmdConfigs.toSeq, interfaces.toSeq)
+    Profile.generateJson(cpu, cmdConfigs.toSeq, gateway.interfaces)
     gateway
   }
 

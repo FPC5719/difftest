@@ -93,11 +93,4 @@ object Profile {
     val difftestProfile = DifftestProfile.fromBundles(cpu, cmdConfigs, bundles)
     FileControl.write(Seq(difftestProfile.toJsonString), s"${profileName}_profile.json")
   }
-
-  // This function generates the json profile for current DiffTest interfaces.
-  def generateJson(cpu: String): Unit = {
-    val cmdConfigs = DifftestModule.get_command_configs()
-    val bundles = DifftestModule.get_current_interfaces()
-    generateJson(cpu, cmdConfigs, bundles)
-  }
 }
